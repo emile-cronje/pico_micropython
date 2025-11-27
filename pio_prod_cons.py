@@ -122,10 +122,10 @@ def main():
     # --- Main Operation ---
     # Test with both raw data and strings
     test_strings = [
-        "Hello PIO World!123456",
-        "Testing 1 2 3...5734567567356735",
-        "Hello PIO World!gadjghladfjghladjg",
-        "Testing 1 2 3...34879a87098"
+        "Hello PIO World!123456"*40,
+        "Testing 1 2 3...5734567567356735"*40,
+        "Hello PIO World!gadjghladfjghladjg"*40,
+        "Testing 1 2 3...34879a87098"*40
     ]
 
     # Only use as many strings as we have pairs
@@ -359,4 +359,8 @@ def main():
 
 
 if __name__ == "__main__":
+    start_time = time.ticks_us()
     main()
+    end_time = time.ticks_us()
+    duration_ms = time.ticks_diff(end_time, start_time) / 1000000
+    print(f"\nTotal execution time: {duration_ms:.2f} s")
