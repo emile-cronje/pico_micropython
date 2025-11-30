@@ -49,7 +49,7 @@ IP   = "192.168.10.250"  # your TCP server IP
 PORT = 8080             # your TCP server port
 
 # Test generator settings
-iTestMsgCount = 100
+iTestMsgCount = 2
 testMsgLength = 1
 
 # Rate control config
@@ -596,20 +596,32 @@ async def sender(msg_q, swriter):
 
 async def uart_reader_loop(recv_q, sreader):
     """Sole consumer of UART input. Splits CRLF. Routes +IPD to recv_q, resolves AT tokens."""
+    global uart
     buf = b''
     print("receiver start...")    
     
     while True:
         try:
-            chunk = await sreader.read(256)
+            # Read directly from UART instead of StreamReader
+            if uart.any():
+                chunk = uart.read()
+            else:
+                chunk = None
             
             if not chunk:
-                await asyncio.sleep_ms(1)
+                await asyncio.sleep_ms(10)
                 continue
 
-#            print("client received: " + str(chunk))
+            print("client received:")
+            print(chunk)
+            LAST_RX_MS[0] = time.ticks_ms()
             buf += chunk
-            s = buf.decode()
+            try:
+                s = buf.decode()
+            except:
+                # Skip invalid UTF-8, keep buffer as-is for now
+                await asyncio.sleep_ms(10)
+                continue
 
             if (s.find('+IPD') >= 0):
                 n1 = s.find('+IPD,')
@@ -640,14 +652,14 @@ async def uart_reader_loop(recv_q, sreader):
                     line = buf[:i]
                     buf = buf[i+2:]  # drop CRLF
                     
-              #      print('buf: ', buf)
-               #     print('line: ', line)                                
+                    print('buf: ', buf)
+                    print('line: ', line)                                
 
                     if not line:
                         continue
 
                     # Debug (optional): print raw lines
-#                    print('[UART]', line)
+                    print('[UART]', line)
 
                     # ---- AT token checks ----
                     if b'OK' in line:
@@ -669,7 +681,8 @@ async def uart_reader_loop(recv_q, sreader):
                     try:
                         s_line = line.decode()
                     except:
-                        s_line = line.decode(errors='ignore')
+                        # Skip lines with invalid UTF-8
+                        continue
 
                     jstart = s_line.find('{')
                     jend = s_line.rfind('}')
@@ -700,11 +713,11 @@ def buildTestMsg(msg_in):
     # create a hash of the message    
     _out_hash_md5.update(msg_in)
     
-    # encode the msg in base64
-    base64_msg = ubinascii.b2a_base64(msg_in)
+    # encode the msg in base64 (strip trailing newline and decode to string)
+    base64_msg = ubinascii.b2a_base64(msg_in)[:-1].decode()
     
-    # encode the msg hash in base64    
-    base64_hash_msg = ubinascii.b2a_base64(_out_hash_md5.digest())[:-1]
+    # encode the msg hash in base64 (strip trailing newline and decode to string)
+    base64_hash_msg = ubinascii.b2a_base64(_out_hash_md5.digest())[:-1].decode()
     msgId = GetMsgId()
 
     msg =   {
@@ -745,7 +758,7 @@ async def testMsgGenerator(msg_q):
         await msg_q.put((msgId, msg_json))
         
         icounter += 1
-        await asyncio.sleep_ms(50)
+        await asyncio.sleep_ms(500)  # Increased from 50ms to 500ms
 
 # -----------------------------
 # Watchdog (optional hard reset)
