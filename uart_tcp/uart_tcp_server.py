@@ -274,7 +274,11 @@ async def readline(sreader, limit=1024):
             return bytes(buf)
         
         buf += ch
-        
+        # Special case: ESP-AT data prompt '>' does not end with newline.
+        # Return immediately so token dispatch can see it and unblock send_at().
+        if ch == b'>' and len(buf) == 1:
+            return bytes(buf)
+
         if ch == b'\n' or len(buf) >= limit:
             return bytes(buf)
 
@@ -404,6 +408,7 @@ async def json_line_reader_stream(
                         continue
                     link_id_str = chunk[p_id_start+1:p_id_end]
                     link_id = int(link_id_str)
+                    print(f'DEBUG: Received +IPD with link_id={link_id}')
                     # payload begins after ':'
                     payload_str = chunk[p_len_end+1:]
                 except Exception:
@@ -468,21 +473,30 @@ async def sender_loop(send_q):
 
             print('Data to send:')
             print(str(data))
+            print(f'DEBUG: Sending to link_id={link_id}')
 
             # prepare payload with CRLF so client can split lines
             payload = data if isinstance(data, (bytes, bytearray)) else data.encode('utf-8')
             payload += b'\r\n'
 
             cmd = f'AT+CIPSEND={link_id},{len(payload)}'
+            print(f'DEBUG: AT command: {cmd}')
             # expect prompt '>' for data send
             ok = await send_at(cmd, expect=('>',), timeout_ms=5000)
+            print(f'DEBUG: Got prompt ok={ok}')
             
             if ok:
+                print(f'DEBUG: About to send {len(payload)} bytes')
                 await swriter.awrite(payload)
                 # Pace on SEND OK to enforce strict framing (no extra AT)
-                await wait_token('SEND OK', timeout_ms=5000)
-
-            print('Msg sent OK...\r')
+                send_ok = await wait_token('SEND OK', timeout_ms=5000)
+                print(f'DEBUG: SEND OK received: {send_ok}')
+                if send_ok:
+                    print('Msg sent OK...')
+                else:
+                    print('Msg sent but no SEND OK token')
+            else:
+                print('CIPSEND prompt not received; skipping payload send')
         except Exception as ex:
             print('sender_loop error:', ex)
 

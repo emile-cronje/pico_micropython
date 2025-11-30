@@ -53,7 +53,6 @@ PORT = 8080             # your TCP server port
 iTestMsgCount = 2
 testMsgLength = 1
 BATCH_SIZE = 2
-
 # Rate control config
 BYTES_PER_SEC      = 2048   # throttle raw throughput (0 = unlimited)
 MSG_PER_SEC        = 10     # throttle number of messages/ATs (0 = unlimited)
@@ -552,6 +551,7 @@ async def start_client(ssid, pwd, ip, port, verbose=True):
         ('AT+CWJAP="%s","%s"' % (ssid, pwd), ('OK','ALREADY CONNECTED','FAIL')),
         ('AT+CIFSR', ('OK',)),
         ('AT+CIPMUX=0', ('OK',)),  # Single connection mode
+        ('AT+CIPMODE=0', ('OK',)),  # Explicitly set normal mode
         ('AT+CIPSTART="TCP","%s",%s' % (ip, port), ('OK','ALREADY CONNECTED','ERROR')),
     ]
     for cmd, expect in steps:
@@ -571,6 +571,11 @@ async def start_client(ssid, pwd, ip, port, verbose=True):
     # Stay in normal mode - no CIPMODE=1
     TRANSPARENT_MODE[0] = False
     TRANSPARENT_READY[0] = False
+    
+    # Give the TCP connection a moment to fully establish
+    if verbose:
+        print('Waiting for TCP connection to stabilize...')
+    await asyncio.sleep_ms(500)
 
     return True
 
@@ -600,12 +605,19 @@ async def sender(msg_q, swriter):
                 await msg_bucket.consume(1)
 
                 # Normal mode: AT+CIPSEND=<length>
+                # Use write_at_line instead of send_at to avoid competing UART readers
                 cmd = 'AT+CIPSEND=%d' % len(payload_bytes)
-                ok = await send_at(cmd, expect=('>',), timeout_ms=5000, verbose=False)
+                print('AT>>', cmd)
+                await write_at_line(cmd)
+                
+                # Wait for '>' prompt
+                ok = await wait_token('>', timeout_ms=5000)
                 
                 if not ok:
-                    print('AT+CIPSEND failed for msgId:', msgId)
+                    print('AT+CIPSEND failed for msgId:', msgId, '(no > prompt)')
                     continue
+                
+                print('Got > prompt, sending payload for msgId:', msgId)
                 
                 # Send the payload after receiving '>'
                 await swriter.awrite(payload_bytes)
@@ -675,35 +687,73 @@ async def uart_reader_loop(recv_q, sreader):
                 await asyncio.sleep_ms(10)
                 continue
 
-            print("client received:")
-#            print(chunk)
+            print("client received:", chunk)
             LAST_RX_MS[0] = time.ticks_ms()
             buf += chunk
+            
+            # Check for '>' prompt immediately (may not have CRLF)
+            if b'>' in buf:
+                _maybe_set('>')
+                # Remove the '>' from buffer after signaling
+                buf = buf.replace(b'>', b'', 1)
+            
             # Best-effort decode for parsing; keep raw buf for byte scanning
             try:
                 s = buf.decode()
             except:
                 s = None
 
-            if (s.find('+IPD') >= 0):
-                n1 = s.find('+IPD,')
-                n2 = s.find(',',n1+5)
-                ID = int(s[n1+5:n2])
-                n3 = s.find(':')
-                s = s[n3+1:]
-                
-                json_open_tag_index = s.find('{')
-                json_close_tag_index = s.find('}') + 1
-                
-                if ((json_open_tag_index >= 0) and (json_close_tag_index > 0)):
-                    s = s[json_open_tag_index:json_close_tag_index]
-                    is_json = True
-                
-#                print("Parsed data...\r\n")
- #               print("ID= " + str(ID) + ", Data= " + s + '\r\n' + "IsJSON= " + str(is_json))
+            if s and ('+IPD,' in s):
+                print("Found +IPD in buffer:", s[:100])  # Debug: show first 100 chars
+                # Extract header between '+IPD,' and first ':'
+                ipd_start = s.find('+IPD,')
+                colon_pos = s.find(':', ipd_start)
+                if colon_pos == -1:
+                    # Wait for rest of frame
+                    continue
+                header_body = s[ipd_start+5:colon_pos]  # after '+IPD,' up to ':'
+                # Two possible formats:
+                #   single-link (CIPMUX=0): <len>
+                #   multi-link  (CIPMUX=1): <id>,<len>
+                if ',' in header_body:
+                    # multi-link
+                    parts = header_body.split(',')
+                    try:
+                        ID = int(parts[0])
+                        length = int(parts[1])
+                    except ValueError:
+                        # malformed; wait for more data
+                        continue
+                else:
+                    # single-link
+                    ID = 0
+                    try:
+                        length = int(header_body)
+                    except ValueError:
+                        continue
+                payload = s[colon_pos+1:]
+                # If payload shorter than declared length, await more UART data
+                if len(payload) < length:
+                    continue
+                # Trim payload to declared length in case extra bytes follow
+                payload = payload[:length]
+                json_open = payload.find('{')
+                json_close = payload.rfind('}')
+                if json_open == -1 or json_close == -1:
+                    # Not JSON; ignore for now
+                    continue
+                json_text = payload[json_open:json_close+1]
+                try:
+                    msg = ujson.loads(json_text)
+                except Exception as ex:
+                    print('JSON parse error:', ex)
+                    continue
                 data_received_ok = True
-                msg = ujson.loads(s)                
-                await recv_q.put(msg)                
+                await recv_q.put(msg)
+                # Remove processed frame from buffer (rebuild from remaining raw bytes)
+                # Re-encode remaining part after processed frame boundary
+                remaining = s[colon_pos+1+length:]
+                buf = remaining.encode()
             else:
                 # First, consume any CRLF-delimited lines for AT tokens and potential JSON
                 progressed = True
@@ -725,6 +775,8 @@ async def uart_reader_loop(recv_q, sreader):
                             _maybe_set('ERROR')
                         if b'FAIL' in line:
                             _maybe_set('FAIL')
+                        if b'SEND OK' in line:
+                            _maybe_set('SEND OK')
                         if b'ALREADY CONNECTED' in line:
                             _maybe_set('ALREADY CONNECTED')
                         # JSON on this line
