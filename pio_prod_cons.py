@@ -132,7 +132,7 @@ def main():
         ))
 
     # --- Main Operation ---
-    # Build per-pair test payloads; extend base patterns if we have more pairs than templates.
+    # Build a shared payload queue and let all producer/consumer pairs drain it collaboratively.
     base_strings = [
         "Hello PIO World!123456",
         "Testing 1 2 3...5734567567356735",
@@ -140,171 +140,83 @@ def main():
         "Testing 1 2 3...34879a87098",
     ]
 
-    test_strings = []
-    for i in range(entityCount):
-        base = base_strings[i % len(base_strings)]
-        decorated = f"{base} [pair {i}]"
-        test_strings.append(decorated * multiple)
-    
-    # Convert strings to 32-bit words
+    shared_string = " | ".join(base_strings) * multiple
+
     def string_to_words(s):
-        """Convert a string to a list of 32-bit words (big-endian)"""
         data = s.encode('utf-8')
         words = []
-        # Pad to multiple of 4 bytes
         padded = data + b'\x00' * ((4 - len(data) % 4) % 4)
-        # Pack into 32-bit words
         for i in range(0, len(padded), 4):
             word = (padded[i] << 24) | (padded[i+1] << 16) | (padded[i+2] << 8) | padded[i+3]
             words.append(word)
-        return words, len(data)  # Return words and original length
-    
-    test_data = []
-    original_lengths = []
-    
-    for s in test_strings:
-        words, length = string_to_words(s)
-        test_data.append(words)
-        original_lengths.append(length)
-        print(f"String '{s}' -> {len(words)} words ({length} bytes)")
-    
-    # Check if any string exceeds FIFO capacity
+        return words, len(data)
+
+    shared_words, shared_len = string_to_words(shared_string)
+    print(f"Shared queue length: {len(shared_words)} words ({shared_len} bytes)")
+
     FIFO_DEPTH = 4
-    max_words = max(len(words) for words in test_data)
-    
-    if max_words > FIFO_DEPTH:
-        print(f"\nNote: Maximum {max_words} words exceeds TX FIFO depth of {FIFO_DEPTH}.")
-        print(f"Will use streaming mode to send data.")
-        streaming_mode = True
-    else:
-        streaming_mode = False
-    
-    num_words_to_send = max(len(words) for words in test_data)
-    
-    print(f"\nSending up to {num_words_to_send} words per producer...")
-    
-    if streaming_mode:
-        # Streaming mode: Load initial batch, activate, then stream remaining words
-        print("Using streaming mode...")
-        
-        # Track how many words have been sent for each producer
-        words_sent = [0] * entityCount
-        
-        # Load initial batch (up to FIFO_DEPTH words)
-        for i in range(entityCount):
-            initial_count = min(FIFO_DEPTH, len(test_data[i]))
-            print(f"Producer {i} pre-loading {initial_count} words:")
-            
-            for j in range(initial_count):
-                producers[i].put(test_data[i][j])
-                print(f"  - {hex(test_data[i][j])}")
-                words_sent[i] += 1
-        
-        # Activate state machines
-        for sm in consumers:
-            sm.active(1)
-        for sm in producers:
-            sm.active(1)
-        print("State machines activated.")
-        
-        # Track received words during streaming to prevent RX FIFO overflow
-        received_words = [[] for _ in range(entityCount)]
-        
-        # Stream remaining words as the producer consumes them
-        all_done = False
-        while not all_done:
-            all_done = True
-            time.sleep(0.005)  # Small delay between checks
-            
-            # Read from consumers to prevent RX FIFO overflow
-            for i in range(entityCount):
-                while consumers[i].rx_fifo():
-                    received_words[i].append(consumers[i].get())
-            
-            for i in range(entityCount):
-                # Check if there are more words to send for this producer
-                if words_sent[i] < len(test_data[i]):
-                    all_done = False
-                    # Check TX FIFO space (returns number of words in FIFO)
-                    fifo_count = producers[i].tx_fifo()
-                    fifo_space = FIFO_DEPTH - fifo_count
-                    
-                    # Send as many words as we can fit
-                    while fifo_space > 0 and words_sent[i] < len(test_data[i]):
-                        word_to_send = test_data[i][words_sent[i]]
-                        producers[i].put(word_to_send)
-                        print(f"Producer {i} streaming word {words_sent[i]}: {hex(word_to_send)}")
-                        words_sent[i] += 1
-                        fifo_space -= 1
-        
-        print("All words streamed.")
-        
-        # Wait for final transmission to complete
-        time_per_word = (32 * 10) / pio_freq
-        final_wait = FIFO_DEPTH * time_per_word * 1.5
-        print(f"Waiting {final_wait:.3f}s for final words to transmit...")
-        time.sleep(final_wait)
-        
-        # Read any remaining words from consumers
+    streaming_mode = True  # Always stream from the shared queue
+
+    print("\nDistributing shared queue across producers...")
+
+    # Track how many words each producer receives and each consumer outputs for verification.
+    assigned_words = [[] for _ in range(entityCount)]
+    received_words = [[] for _ in range(entityCount)]
+
+    # Prime TX FIFOs up to their depth.
+    queue_idx = 0
+    for i in range(entityCount):
+        preload = min(FIFO_DEPTH, len(shared_words) - queue_idx)
+        print(f"Producer {i} pre-loading {preload} words")
+        for _ in range(preload):
+            word = shared_words[queue_idx]
+            producers[i].put(word)
+            assigned_words[i].append(word)
+            queue_idx += 1
+
+    # Activate all SMs.
+    for sm in consumers:
+        sm.active(1)
+    for sm in producers:
+        sm.active(1)
+    print("State machines activated.")
+
+    # Streaming loop: keep feeding any producer with FIFO space until the shared queue is empty.
+    while queue_idx < len(shared_words):
+        time.sleep(0.002)
+
+        # Drain consumer RX to avoid overflows.
         for i in range(entityCount):
             while consumers[i].rx_fifo():
                 received_words[i].append(consumers[i].get())
-        
-        print("Streaming complete.")
-        for i in range(entityCount):
-            print(f"  Consumer {i} received {len(received_words[i])} words")
-        
-    else:
-        # Original mode: Load all words before activating
-        # Pad shorter lists with zeros to match the longest
-        for i in range(entityCount):
-            words_to_send = test_data[i]
-            padded_words = words_to_send + [0] * (num_words_to_send - len(words_to_send))
-            print(f"Producer {i} loading {len(padded_words)} words ({len(words_to_send)} data + {len(padded_words) - len(words_to_send)} padding):")
-            for word in padded_words:
-                print(f"  - {hex(word)}")
-                producers[i].put(word)
-                
-        print("All words loaded into TX FIFOs.")
-        
-        # Activate state machines
-        for sm in consumers:
-            sm.active(1)
-        
-        # Check TX FIFO before activating producers
-        print("\nTX FIFO status before activating producers:")
-        for i in range(entityCount):
-            print(f"  Producer {i} TX FIFO: {producers[i].tx_fifo()} words")
-        
-        for sm in producers:
-            sm.active(1)
-        print("State machines activated.")
-        
-        # Check immediately after activation
-        time.sleep(0.001)
-        print("\nTX FIFO status 1ms after activation:")
-        for i in range(entityCount):
-            print(f"  Producer {i} TX FIFO: {producers[i].tx_fifo()} words")
-        
-        # Wait for transmission to complete
-        # Each word takes (32 bits * 10 cycles/bit) / freq seconds
-        time_per_word = (32 * 10) / pio_freq
-        total_time = num_words_to_send * time_per_word * 1.5  # 50% margin
-        print(f"Waiting {total_time:.3f}s for transmission...")
-        time.sleep(total_time)
-    
-    # Check FIFO status for debugging
-    print("\nFIFO status after transmission:")
-    for i in range(entityCount):
-        print(f"  Producer {i} TX FIFO: {producers[i].tx_fifo()} words remaining")
-        print(f"  Consumer {i} RX FIFO: {consumers[i].rx_fifo()} words available")
 
-    print("\nChecking consumers...")
+        # Fill producers with any available FIFO space.
+        for i in range(entityCount):
+            fifo_count = producers[i].tx_fifo()
+            fifo_space = FIFO_DEPTH - fifo_count
+            while fifo_space > 0 and queue_idx < len(shared_words):
+                word = shared_words[queue_idx]
+                producers[i].put(word)
+                assigned_words[i].append(word)
+                queue_idx += 1
+                fifo_space -= 1
+
+    # Give time for tail to flush.
+    tail_words = FIFO_DEPTH * 2
+    time_per_word = (32 * 10) / pio_freq
+    tail_wait = tail_words * time_per_word
+    time.sleep(tail_wait)
+
+    # Final RX drain.
+    for i in range(entityCount):
+        while consumers[i].rx_fifo():
+            received_words[i].append(consumers[i].get())
+
+    # --- Verification ---
+    print("\nVerifying shared queue delivery...")
     all_correct = True
-    
-    # Helper to convert words back to string
+
     def words_to_string(words, length):
-        """Convert 32-bit words back to string"""
         data = bytearray()
         for word in words:
             data.append((word >> 24) & 0xFF)
@@ -312,59 +224,38 @@ def main():
             data.append((word >> 8) & 0xFF)
             data.append(word & 0xFF)
         return data[:length].decode('utf-8')
-    
+
+    total_assigned = sum(len(a) for a in assigned_words)
+    total_received = sum(len(r) for r in received_words)
+    print(f"Assigned words: {total_assigned}, Received words: {total_received}")
+
+    # Check per-consumer correctness against what was assigned to its paired producer.
     for i in range(entityCount):
-        print(f"\nConsumer {i} results:")
-        expected_words = test_data[i]
-        # In streaming mode received_words was captured earlier; in batch, build now
-        if not streaming_mode:
-            received_words = [[] for _ in range(entityCount)]
-            while consumers[i].rx_fifo():
-                received_words[i].append(consumers[i].get())
-        
-        # In streaming mode, we send exact words; in batch mode, we may have padding
-        if streaming_mode:
-            expected_count = len(expected_words)
-        else:
-            expected_count = len(expected_words)
-        
-        actual_word_count = len(expected_words)
-        received_data_words = received_words[i][:actual_word_count]
-        
-        if streaming_mode:
-            print(f"  Expected {actual_word_count} words, received {len(received_words[i])} words")
-        else:
-            print(f"  Expected {actual_word_count} words, received {len(received_data_words)} data words (+ {len(received_words[i]) - len(received_data_words)} padding)")
-        
-        if len(received_data_words) != actual_word_count:
-            print(f"  FAIL! Word count mismatch")
+        expected = assigned_words[i]
+        actual = received_words[i]
+        if len(expected) != len(actual):
+            print(f"Consumer {i}: count mismatch (expected {len(expected)}, got {len(actual)})")
             all_correct = False
+            continue
+        for idx, (e, a) in enumerate(zip(expected, actual)):
+            if e != a:
+                print(f"Consumer {i}: word {idx} mismatch (expected {hex(e)}, got {hex(a)})")
+                all_correct = False
+                break
         else:
-            # Check each word
-            words_match = True
-            for j, (expected, received) in enumerate(zip(expected_words, received_data_words)):
-                if received != expected:
-                    print(f"  Word {j}: FAIL! Received {hex(received)}, Expected {hex(expected)}")
-                    words_match = False
-                    all_correct = False
-            
-            if words_match:
-                # Decode the string
-                received_string = words_to_string(received_data_words, original_lengths[i])
-                expected_string = test_strings[i]
-                print(f"  String received: '{received_string}'")
-                print(f"  String expected: '{expected_string}'")
-                if received_string == expected_string:
-                    print(f"  ✓ String matches!")
-                else:
-                    print(f"  ✗ String mismatch!")
-                    all_correct = False
-    
-    print("\n" + "-" * 20)
-    if all_correct:
-        print("Success! All consumers received the correct data.")
+            print(f"Consumer {i}: received {len(actual)} words OK")
+
+    if all_correct and total_assigned == len(shared_words) and total_received == len(shared_words):
+        reconstructed = []
+        for chunk in assigned_words:
+            reconstructed.extend(chunk)
+        rebuilt = words_to_string(reconstructed, shared_len)
+        if rebuilt == shared_string:
+            print("Shared queue delivered intact.")
+        else:
+            print("Warning: reconstructed string mismatch despite word match.")
     else:
-        print("Failure: Some or all consumers reported errors.")
+        print("Shared queue delivery had errors.")
 
     # --- Cleanup ---
     for sm in producers + consumers:
