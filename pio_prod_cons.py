@@ -6,7 +6,8 @@ from rp2 import PIO, StateMachine, asm_pio
 # MicroPython maps state machine IDs sequentially across PIO blocks (0-3 => PIO0, 4-7 => PIO1, 8-11 => PIO2).
 MAX_STATE_MACHINES = 12
 STATE_MACHINES_REQUESTED = 12  # Set this to any even number up to 12
-multiple = 25
+multiple = 50
+PIO_FREQ_BASE = 20000
 
 
 def resolve_counts():
@@ -81,7 +82,7 @@ def create_consumer_pio(clock_pin_id):
 def main():
     sm_count, entityCount = resolve_counts()
     print(f"Init complete... using {sm_count} state machines -> {entityCount} producer/consumer pairs")
-    pio_freq = 20000
+    pio_freq = PIO_FREQ_BASE
 
     # Initialize clock pins to LOW before setting up state machines
     # Each pair uses data pin GP(2*i) and clock pin GP(2*i+1)
@@ -98,7 +99,9 @@ def main():
     # Each pair uses two state machines. Pico 2 has 12 SM total (3 PIO blocks × 4 SM), so we can run 6 pairs.
     if entityCount < 1:
         raise ValueError("entityCount must be >= 1")
+    
     max_pairs = 6  # 12 state machines / 2 per pair
+    
     if entityCount > max_pairs:
         raise ValueError(f"entityCount too large: max {max_pairs} pairs (12 state machines)")
 
@@ -146,6 +149,7 @@ def main():
         data = s.encode('utf-8')
         words = []
         padded = data + b'\x00' * ((4 - len(data) % 4) % 4)
+        
         for i in range(0, len(padded), 4):
             word = (padded[i] << 24) | (padded[i+1] << 16) | (padded[i+2] << 8) | padded[i+3]
             words.append(word)
@@ -169,6 +173,7 @@ def main():
     for i in range(entityCount):
         preload = min(FIFO_DEPTH, len(shared_words) - queue_idx)
         print(f"Producer {i} pre-loading {preload} words")
+        
         for _ in range(preload):
             word = shared_words[queue_idx]
             producers[i].put(word)
