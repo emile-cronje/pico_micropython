@@ -1,4 +1,4 @@
-from mqtt_as import MQTTClient, config
+from mqtt_as_latest import MQTTClient, config
 import uasyncio as asyncio
 import gc
 import ujson
@@ -8,14 +8,11 @@ import machine
 import os, uos
 import time
 from machine import SPI, Pin
-import sdcard
-from cpu_monitor_class import CPUMon
-from aclock_class import AClock
 from queue import Queue
 
-SERVER = '192.168.10.124'
-SERVER = '192.168.10.135'
-SERVER = '192.168.10.174'
+SERVER_1 = '192.168.10.174'
+SERVER_2 = '192.168.10.135'
+SERVER_3 = '192.168.10.124'
 
 _error_q = {}
 _success_q = {}
@@ -23,6 +20,12 @@ _send_q = Queue()
 _in_hash_md5 = uhashlib.sha256()
 fout = None
 backupDir = '/sd/backups_new'
+
+async def conn_han_1(client):
+    await client.subscribe('rp6502_sub_1', 1)
+
+async def conn_han_2(client):
+    await client.subscribe('rp6502_sub_2', 1)
 
 def sha256_simple(input_data):
     """
@@ -68,7 +71,7 @@ def sha256_simple(input_data):
 
 def callback(topic, msg_in, retained):
     global _success_q, _error_q
-    print((topic, msg_in, retained))
+    print("Callback: " + str((topic, msg_in, retained)))
     msg = ujson.loads(msg_in)
     
     if ("Category" in msg.keys()):
@@ -132,14 +135,6 @@ def handleTestMessage(msg):
         print('Test handler error: %s' % ex)        
         #error_q.append('Test handler error: %s' % ex)
     
-async def conn_han(client):
-#    await client.subscribe('pico1_files', 1)
- #   print("subscribed to pico1_files...")
-  #  await client.subscribe('pico1_test', 1)
-   # print("subscribed to pico1_test...")
-    await client.subscribe('rp6502_pub', 1)
-    print("subscribed to rp6502_pub...")
-
 def processFile(msg, success_q, error_q):
     global _in_hash_md5, fout
    
@@ -195,13 +190,11 @@ def file_exist(filename):
         exists = False
     return exists        
     
-async def main(client):
+async def main():
     n = 0
     
     while True:
         await asyncio.sleep(2)
-        #print('publish', n)
-        #await client.publish('rp6502_sub', '{}'.format(n), qos = 1)
         n += 1
 
 def free(full=False):
@@ -239,72 +232,49 @@ async def monitorStatusQueues(success_q, error_q):
         print("Time..." + str(time.gmtime()))                
         await asyncio.sleep(3)
 
-async def monitorSendQueue(mqtt_client, send_q):
-    await client.connect()
+async def monitorSendQueue(mqtt_clients, send_q):
+    for j in range(len(mqtt_clients)):    
+        await mqtt_clients[j].connect()
+        
+    i = 0
     
     while True:
         msg = await send_q.get()
-        await mqtt_client.publish('rp6502_sub', msg, qos = 1)
-#        print('monitorSendQueue: published...' + str(msg))
-        await asyncio.sleep(1)
+        
+        if (i % 2) == 0:
+            await mqtt_clients[0].publish('rp6502_pub_1', msg, qos = 1)
+            print("Published to server 1")
+        else:            
+            await mqtt_clients[0].publish('rp6502_pub_2', msg, qos = 1)
+            print("Published to server 2")            
+
+        i += 1
+        await asyncio.sleep(.5)
 
 def clockTest():
     clock = AClock()
     clock.run()
 
 config['subs_cb'] = callback
-config['connect_coro'] = conn_han
-config['server'] = SERVER
+config['connect_coro'] = conn_han_1
+config['server'] = SERVER_1
 
-# Assign chip select (CS) pin (and start it high)
-cs = machine.Pin(22, machine.Pin.OUT)
+MQTTClient.DEBUG = True
+client_1 = MQTTClient(config)
 
-# Intialize SPI peripheral (start with 1 MHz)
-spi = machine.SoftSPI(
-                  baudrate=1000000,
-                  polarity=0,
-                  phase=0,
-                  bits=8,
-                  firstbit=machine.SPI.MSB,
-                  sck=machine.Pin(5),
-                  mosi=machine.Pin(18),
-                  miso=machine.Pin(19))
+mqtt_clients = []
+mqtt_clients.append(client_1)
 
-# Initialize SD card
-sd = sdcard.SDCard(spi, cs)
+#config['server'] = SERVER_2
+#config['connect_coro'] = conn_han_2
 
-# Mount filesystem
-vfs = uos.VfsFat(sd)
-uos.mount(vfs, "/sd")
-
-#spi = SPI(1, baudrate = 40000000, sck = Pin(10), mosi = Pin(11), miso = Pin(12))
-#sd = sdcard.SDCard(spi, Pin(13))
-#vfs=os.VfsFat(sd)    
-#os.mount(sd, "/sd")
-
-if (dir_exists(backupDir) == True):
-#    print("removing: " + backupDir)    
- #   os.rmdir(backupDir)
-  #  print("removed: " + backupDir)
-   # os.mkdir(backupDir)
-    #print("created: " + backupDir)
-    print("dir exists: " + backupDir)    
-else:
-    print("making new " + backupDir)    
-    os.mkdir(backupDir)
-    print("created: " + backupDir)    
-
-MQTTClient.DEBUG = True  # Optional: print diagnostic messages
-client = MQTTClient(config)
+#client_2 = MQTTClient(config)
+#mqtt_clients.append(client_2)
 
 try:
 #    asyncio.create_task(monitorStatusQueues(_success_q, _error_q))
-    asyncio.create_task(monitorSendQueue(client, _send_q))
-    
-    #cpuMon = CPUMon()
-    useCore1 = False
-    #asyncio.create_task(cpuMon.main(worker_func = clockTest, useCore1 = useCore1, showUsage = True))
-    
-    asyncio.run(main(client))
+    asyncio.create_task(monitorSendQueue(mqtt_clients, _send_q))
+    asyncio.run(main())
 finally:
-    client.close()
+    client_1.close()
+ #   client_2.close()    
