@@ -4,7 +4,8 @@ import utime
 
 class AdrHelper:
     def days_between(self, d1, d2):
-        return utime.mktime(d1) // (24*3600) - utime.mktime(d2) // (24*3600)
+        """Calculate days between two date tuples as decimal (matching SQLite julianday behavior)"""
+        return (utime.mktime(d1) - utime.mktime(d2)) / (24*3600)
     
     def sort_json_objects_by_date(self, json_objects):
         n = len(json_objects)
@@ -36,36 +37,43 @@ class AdrHelper:
         return int(non_scientific)
     
     def calculate_average_daily_rate(self, meter_readings):
-        if len(meter_readings) < 1:  # Changed from < 2 to match PostgreSQL behavior
-            print("No readings...")
+        """Calculate ADR matching SQLite logic:
+        SELECT AVG(COALESCE(daily_rate, 0)) AS average_daily_rate
+        FROM (
+            SELECT
+                (reading - LAG(reading)) / NULLIF(days_between, 0) AS daily_rate
+            FROM meter_reading
+        )
+        """
+        if len(meter_readings) < 1:
             return 0
         
         daily_rates = []
         
-        # Process all readings (including first one which will have None/0 rate like PostgreSQL LAG)
+        # Process all readings (first one gets 0 like LAG returning NULL -> COALESCE to 0)
         for i in range(len(meter_readings)):
             if i == 0:
                 # First reading has no previous reading (like LAG returning NULL)
-                # PostgreSQL COALESCE converts this NULL to 0
+                # SQLite COALESCE converts this NULL to 0
                 daily_rates.append(0)
             else:
                 previous = meter_readings[i - 1]
                 current = meter_readings[i]
                 delta_reading = current["reading"] - previous["reading"]
                 
-                # Calculate days between as integer days (matching PostgreSQL DATE - DATE)
+                # Calculate decimal days between (matching SQLite julianday behavior)
                 current_date = time.localtime(self.convert_to_epoch_seconds(current["readingOn"]))
                 previous_date = time.localtime(self.convert_to_epoch_seconds(previous["readingOn"]))
                 delta_days = self.days_between(current_date, previous_date)
                 
+                # SQLite NULLIF converts 0 to NULL, then COALESCE converts NULL to 0
                 if delta_days == 0:
-                    # Division by zero case - PostgreSQL NULLIF makes this NULL, COALESCE makes it 0
                     daily_rates.append(0)
                 else:
                     daily_rate = delta_reading / delta_days
                     daily_rates.append(daily_rate)
         
-        # Calculate average of all daily rates (including zeros)
+        # Calculate average of all daily rates (including zeros for first reading and zero-day gaps)
         if len(daily_rates) == 0:
             return 0
         

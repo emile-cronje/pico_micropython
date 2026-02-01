@@ -50,18 +50,7 @@ class MeterController:
         messageId = updatedMeter["messageId"]
 
         if (savedMeter == None):
-            meter_data = {
-                            "MqttSessionId": mqttSessionId,                                                                                                                            
-                            "messageId": messageId,
-                            "ClientId": id,                                                                            
-                            "EntityType":"Meter",
-                            "Operation":"Update"
-                         }
-
-            for topic in self.topics:
-                await self.mqttConnectionPool.Publish(topic, json.dumps(meter_data))
-                
-            return None
+            return {"statusCode": 404, "message": "Meter not found"}
         else:        
             savedMeter["version"] = int(savedMeter["version"]) + 1
             savedMeter["code"] = updatedMeter["code"]

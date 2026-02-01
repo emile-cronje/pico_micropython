@@ -872,7 +872,7 @@ class MQTTClient(MQTT_base):
         while True:
             await asyncio.sleep(20)
             gc.collect()
-            self.dprint("RAM free %d alloc %d", gc.mem_free(), gc.mem_alloc())
+#            self.dprint("RAM free %d alloc %d", gc.mem_free(), gc.mem_alloc())
 
     def isconnected(self):
         if self._in_connect:  # Disable low-level check during .connect()

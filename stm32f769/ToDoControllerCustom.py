@@ -47,7 +47,7 @@ class ToDoController:
                 await self.mqtt_client.publish(self.topic, ujson.dumps(item_data), qos = 1)
                 result = "Item updated..."
         else:
-            result = "Item not found..."
+            result = {"statusCode": 404, "message": "ToDo item not found"}
             
         return result            
 

@@ -203,7 +203,6 @@ async def api_ls(request):
         '"' + f + '"' for f in sorted(os.listdir('.'))
     ))
 
-
 @authenticate(credentials=CREDENTIALS)
 async def api_download(request):
     await request.write("HTTP/1.1 200 OK\r\n")
@@ -354,8 +353,11 @@ async def todo_items(request):
         if (dataKey in payload):        
             item = json.loads(payload[dataKey])        
             result = await toDoController.UpdateItem(payload["mqttSessionId"], id, item)
-            
-        await request.write("HTTP/1.1 200 OK\r\n")
+
+        if (type(result) == dict) and (result.get("statusCode") == 404):
+            await request.write("HTTP/1.1 404 Not Found\r\n")
+        else:
+            await request.write("HTTP/1.1 200 OK\r\n")
         await request.write("Content-Type: application/json\r\n\r\n")
         await request.write(json.dumps(result))
         #print("api: done update item...: " + json.dumps(result))                        
@@ -421,8 +423,11 @@ async def assets(request):
             id = urlParts[3]            
             asset = json.loads(payload[dataKey])        
             result = await assetController.UpdateAsset(payload["mqttSessionId"], id, asset)
-            
-        await request.write("HTTP/1.1 200 OK\r\n")
+
+        if (type(result) == dict) and (result.get("statusCode") == 404):
+            await request.write("HTTP/1.1 404 Not Found\r\n")
+        else:
+            await request.write("HTTP/1.1 200 OK\r\n")
         await request.write("Content-Type: application/json\r\n\r\n")
         await request.write(json.dumps(result))
   #      print("api: done update asset...: " + json.dumps(result))                        
@@ -496,8 +501,11 @@ async def meters(request):
             id = urlParts[3]        
             meter = json.loads(payload[dataKey])
             result = await meterController.UpdateMeter(payload["mqttSessionId"], id, meter)
-            
-        await request.write("HTTP/1.1 200 OK\r\n")
+
+        if (type(result) == dict) and (result.get("statusCode") == 404):
+            await request.write("HTTP/1.1 404 Not Found\r\n")
+        else:
+            await request.write("HTTP/1.1 200 OK\r\n")
         await request.write("Content-Type: application/json\r\n\r\n")
         await request.write(json.dumps(result))
   #      print("api: done update meter...: " + json.dumps(result))                        
@@ -558,8 +566,11 @@ async def asset_tasks(request):
             id = urlParts[3]
             assetTask = json.loads(payload[dataKey])
             result = await assetTaskController.UpdateAssetTask(payload["mqttSessionId"], id, assetTask)
-            
-        await request.write("HTTP/1.1 200 OK\r\n")
+
+        if (type(result) == dict) and (result.get("statusCode") == 404):
+            await request.write("HTTP/1.1 404 Not Found\r\n")
+        else:
+            await request.write("HTTP/1.1 200 OK\r\n")
         await request.write("Content-Type: application/json\r\n\r\n")
         await request.write(json.dumps(result))
     elif request.method == "DELETE":
@@ -620,8 +631,11 @@ async def meter_readings(request):
             id = urlParts[3]
             meterReading = json.loads(payload[dataKey])                                
             result = await meterReadingController.UpdateMeterReading(payload["mqttSessionId"], id, meterReading)
-            
-        await request.write("HTTP/1.1 200 OK\r\n")
+
+        if (type(result) == dict) and (result.get("statusCode") == 404):
+            await request.write("HTTP/1.1 404 Not Found\r\n")
+        else:
+            await request.write("HTTP/1.1 200 OK\r\n")
         await request.write("Content-Type: application/json\r\n\r\n")
         await request.write(json.dumps(result))
     elif request.method == "DELETE":
@@ -643,102 +657,6 @@ async def meter_readings(request):
     else:
         raise HttpError(request, 501, "Not Implemented")
 
-def callback(topic, msg_in, retained):
-    global _success_q, _error_q
-    #print('callback...')
-    #print((topic, msg_in, retained))
-    msg = json.loads(msg_in)
-    
-    if ("Category" in msg.keys()):
-        category = msg["Category"]
-    
-        if (category == 'Files'):
-            step = msg["Step"]
-            
-            if (step == 'Start'):
-                print("starting sync...")
-                _success_q.clear()
-                _error_q.clear()
-            else:
-                print("processing file...")                
-                processFile(msg, _success_q, _error_q)
-                
-        if (category == 'Test'):
-            message = msg["Message"]
-            print("Test: " + message)
-    
-async def conn_han(client):
-    await client.subscribe('pico1_files', 1)
-    print("subscribed to pico1_files...")
-    await client.subscribe('pico1_test', 1)
-    print("subscribed to pico1_test...")
-
-def processFile(msg, success_q, error_q):
-    global _in_hash_md5, fout
-   
-    print("process file...")
-    step = msg["Step"]
-    #print("Msg: " + str(msg))
-    
-    if (step == "Header"):
-        print("Processing header...")        
-        _in_hash_md5 = uhashlib.sha256()              
-        file_name = msg["FileName"]            
-        file_out = backupDir + "/copy-" + file_name
-        print("creating file: " + file_out)        
-        fout = open(file_out, "wb")
-        print("created file: " + file_out)
-        success_q[file_name] = 'File copy starting...'
-
-        if (file_name in error_q.keys()):
-            del error_q[file_name]
-
-    elif (step == "Content"):
-        print("Processing content...")                
-        file_name = msg["FileName"]                            
-        file_data = ubinascii.a2b_base64(msg["FileData"])
-        _in_hash_md5.update(file_data)
-        progress = msg["ProgressPercentage"]                                    
-        success_q[file_name] = 'File copy in progress...' + str(progress) + '%'
-        
-        if (fout != None):
-            fout.write(file_data)
-
-    elif (step == "End"):
-        if (fout != None):
-            print("Processing end...")
-            file_name = msg["FileName"]                        
-            in_hash_final = _in_hash_md5.digest()
-            base64_hash_data = ubinascii.b2a_base64(in_hash_final)[:-1]
-            base64_hash_data_string = base64_hash_data.decode("utf-8")
-            in_msg_hash = msg["HashData"]
-        
-            if (base64_hash_data_string == in_msg_hash):
-                success_q[file_name] = "File copy OK"
-            else:
-                error_q[file_name] = "File copy failed"                
-    
-def file_exist(filename):
-    try:
-        f = open(filename, "r")
-        exists = True
-        f.close()
-    except OSError:
-        exists = False
-    return exists        
-
-
-async def mqtt_run(client):
-    await client.connect()
-    n = 0
-    
-#    while True:
- #       await asyncio.sleep(5)
-        #print('publish', n)
-        #await client.publish('nanoweb_pub', '{}'.format(n), qos = 1)
-        #print(free(True))
-  #      n += 1
-
 def free(full=False):
 #    gc.collect()        
     F = gc.mem_free()
@@ -747,41 +665,6 @@ def free(full=False):
     P = '{0:.2f}%'.format(F/T*100)
     if not full: return P
     else : return ('Total:{0} Free:{1} ({2})'.format(T,F,P))
-
-def dir_exists(path):
-    try:
-        f = os.listdir(path)
-        
-        if f != []:
-            return True
-        else:
-            return False
-    except OSError:
-        return False
-
-def removeDb(dbName, tableName):
-    try:
-        if (dir_exists(dbName) == True):
-            print('db exists, try to remove...')
-        
-            print("Removing db:" + dbName)        
-            for file_name in mdb.os.listdir(dbName + '/' + tableName):
-                print("Removing file:" + file_name)                    
-                mdb.os.remove(dbName + '/' + tableName + '/' + file_name)
-                
-            mdb.os.rmdir(dbName + '/' + tableName)
-            
-            for file_name in mdb.os.listdir(dbName):
-                print("file exists, try to remove..." + file_name)                        
-                mdb.os.remove(dbName + '/' + file_name)
-            
-            mdb.os.rmdir(dbName)
-        else:
-            print('db exists, try to remove...')
-            
-        print("Removed db:" + dbName)
-    except Exception:
-        return 'Failed to delete test data.'
 
 async def showMemUsage():
     while True:

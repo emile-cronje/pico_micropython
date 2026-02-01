@@ -21,11 +21,8 @@ _in_hash_md5 = uhashlib.sha256()
 fout = None
 backupDir = '/sd/backups_new'
 
-async def conn_han_1(client):
-    await client.subscribe('rp6502_sub_1', 1)
-
-async def conn_han_2(client):
-    await client.subscribe('rp6502_sub_2', 1)
+async def conn_han(client):
+    await client.subscribe('rp6502_pub_1', 1)
 
 def sha256_simple(input_data):
     """
@@ -240,14 +237,14 @@ async def monitorSendQueue(mqtt_clients, send_q):
     
     while True:
         msg = await send_q.get()
-        
+ 
         if (i % 2) == 0:
-            await mqtt_clients[0].publish('rp6502_pub_1', msg, qos = 1)
-            print("Published to server 1")
+            await mqtt_clients[0].publish('rp6502_sub_1', msg, qos = 1)
         else:            
-            await mqtt_clients[0].publish('rp6502_pub_2', msg, qos = 1)
-            print("Published to server 2")            
+            await mqtt_clients[0].publish('rp6502_sub_1', msg, qos = 1)
 
+        print("Published to server 1:")
+        print(str(msg))
         i += 1
         await asyncio.sleep(.5)
 
@@ -256,7 +253,7 @@ def clockTest():
     clock.run()
 
 config['subs_cb'] = callback
-config['connect_coro'] = conn_han_1
+config['connect_coro'] = conn_han
 config['server'] = SERVER_1
 
 MQTTClient.DEBUG = True
@@ -265,16 +262,9 @@ client_1 = MQTTClient(config)
 mqtt_clients = []
 mqtt_clients.append(client_1)
 
-#config['server'] = SERVER_2
-#config['connect_coro'] = conn_han_2
-
-#client_2 = MQTTClient(config)
-#mqtt_clients.append(client_2)
-
 try:
 #    asyncio.create_task(monitorStatusQueues(_success_q, _error_q))
     asyncio.create_task(monitorSendQueue(mqtt_clients, _send_q))
     asyncio.run(main())
 finally:
     client_1.close()
- #   client_2.close()    

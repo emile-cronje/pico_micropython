@@ -47,19 +47,7 @@ class AssetController:
         messageId = updatedAsset["messageId"]        
         
         if (savedAsset == None):
-            asset_data = {
-                            "MqttSessionId": mqttSessionId,                                                                                                                            
-                            "messageId": messageId,
-                            "ClientId": id,                                                                            
-                            "EntityType":"Asset",
-                            "Operation":"Update"
-                         }
-
-            for topic in self.topics:
-                await self.mqttConnectionPool.Publish(topic, json.dumps(asset_data))
-                print("published not found asset update...")
-                
-            return None
+            return {"statusCode": 404, "message": "Asset not found"}
         else:        
             savedAsset["version"] = int(savedAsset["version"]) + 1
             savedAsset["code"] = updatedAsset["code"]

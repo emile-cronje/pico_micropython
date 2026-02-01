@@ -5,10 +5,11 @@ import utime
 from AdrHelper import AdrHelper
 
 class MeterReadingDaoBT:
-    def __init__(self, btree, meterDao):
+    def __init__(self, btree, meterDao, adr_window_size=30):
         self.db = btree
         self.meterDao = meterDao
-        self.adrHelper = AdrHelper()        
+        self.adrHelper = AdrHelper()
+        self.adr_window_size = adr_window_size  # Number of recent readings to use for ADR calculation        
        
     async def AddMeterReading(self, meterReading):
         db = self.db
@@ -74,9 +75,21 @@ class MeterReadingDaoBT:
         
         return meter_readings
     
-    async def GetAdr(self, meterId):    
+    async def GetAdr(self, meterId):
+        """Calculate ADR using only the most recent readings (window approach)"""
         meterReadings = await self.GetReadingsForMeter(meterId)
+        
+        if not meterReadings or len(meterReadings) == 0:
+            return 0
+        
+        # Sort all readings by date
         meterReadings = self.adrHelper.sort_json_objects_by_date(meterReadings)
+        
+        # Use only the most recent N readings (window)
+        if len(meterReadings) > self.adr_window_size:
+            meterReadings = meterReadings[-self.adr_window_size:]
+        
+        # Calculate ADR on the windowed data
         adr = self.adrHelper.calculate_average_daily_rate(meterReadings)
         return adr
     

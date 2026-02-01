@@ -47,19 +47,7 @@ class ToDoController:
         messageId = updatedItem["messageId"]
         
         if (savedItem == None):
-            item_data = {
-                            "MqttSessionId": mqttSessionId,                                                                                                            
-                            "messageId": messageId,
-                            "ClientId": id,                                                                            
-                            "EntityType":"ToDoItem",
-                            "Operation":"Update"
-                         }
-
-            for topic in self.topics:
-                await self.mqttConnectionPool.Publish(topic, json.dumps(item_data))
-                print("published not found todo update...")
-                
-            return None
+            return {"statusCode": 404, "message": "ToDo item not found"}
         else:
             version = savedItem["version"]
             version += 1
